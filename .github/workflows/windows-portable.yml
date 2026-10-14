@@ -1,0 +1,78 @@
+name: Windows portable
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build launcher exe
+        shell: pwsh
+        run: |
+          pip install -r backend/requirements.txt pyinstaller
+          pyinstaller --noconfirm --onedir --name Velxio `
+            --paths backend `
+            --collect-submodules app `
+            --collect-submodules uvicorn `
+            --collect-all fastapi `
+            --collect-all starlette `
+            launcher/velxio_launcher.py
+
+      - name: Assemble portable folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/Velxio/tools, dist/Velxio/data | Out-Null
+          Copy-Item -Recurse frontend/dist dist/Velxio/frontend
+          Invoke-WebRequest https://downloads.arduino.cc/arduino-cli/arduino-cli_latest_Windows_64bit.zip -OutFile cli.zip
+          Expand-Archive cli.zip -DestinationPath dist/Velxio/tools -Force
+
+      - name: Pre-install Arduino cores (AVR, RP2040)
+        shell: pwsh
+        run: |
+          $env:ARDUINO_DIRECTORIES_DATA = "$PWD/dist/Velxio/data/arduino15"
+          $env:ARDUINO_DIRECTORIES_USER = "$PWD/dist/Velxio/data/Arduino"
+          $cli = "$PWD/dist/Velxio/tools/arduino-cli.exe"
+          & $cli config init --overwrite
+          & $cli config add board_manager.additional_urls https://github.com/earlephilhower/arduino-pico/releases/download/global/package_rp2040_index.json
+          & $cli core update-index
+          & $cli core install arduino:avr
+          & $cli core install rp2040:rp2040
+
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path dist/Velxio/* -DestinationPath Velxio-portable-win64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Velxio-portable-win64
+          path: Velxio-portable-win64.zip
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Velxio-portable-win64.zip
